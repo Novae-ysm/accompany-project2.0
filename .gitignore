@@ -3,3 +3,4 @@ dist
 .env
 audio
 .DS_Store
+data/

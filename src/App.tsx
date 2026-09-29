@@ -9,7 +9,7 @@ import {
   clearMessages,
   type ChatMessage,
 } from './lib/storage'
-import { sendChat } from './lib/api'
+import { sendChat, getStats, clearStats, type StatsData } from './lib/api'
 import { type ThemeId } from './themes'
 import { translations, type Language } from './i18n'
 import {
@@ -28,26 +28,20 @@ import {
   saveBackgroundImages,
   type CustomAsset,
 } from './lib/assets'
-
-function buildSystemPromptFromProfile(profile: ProfileFields) {
-  return `You are ${profile.name}.
-Occupation: ${profile.occupation}.
-Personality: ${profile.personality}.
-Speech style: ${profile.speechStyle}.
-Care style: ${profile.careStyle}.
-Relationship stage: ${profile.relationship}.
-Extra notes: ${profile.extra}
-
-Always stay in character.
-Do not mention that you are an AI.
-Follow the user's language.`
-}
+import {
+  buildPromptByVersion,
+  promptVersions,
+  type PromptVersion,
+} from './promptTemplates'
 
 type LLMSettings = {
   apiKey: string
   baseUrl: string
   model: string
 }
+
+type SettingsTab = 'api' | 'prompt' | 'stats'
+type ContextStrategy = 'full' | 'window'
 
 const SETTINGS_KEY = 'llmSettings'
 
@@ -78,10 +72,27 @@ export default function App() {
   const [showProfileEditor, setShowProfileEditor] = useState(false)
   const [showHistory, setShowHistory] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>('api')
+  const [statsData, setStatsData] = useState<StatsData | null>(null)
   const [voiceEnabled, setVoiceEnabled] = useState(false)
   const [listening, setListening] = useState(false)
   const [leftPanelOpen, setLeftPanelOpen] = useState(true)
   const [rightPanelOpen, setRightPanelOpen] = useState(true)
+
+  const [promptVersion, setPromptVersion] = useState<PromptVersion>(() => {
+    const saved = localStorage.getItem('promptVersion') as PromptVersion | null
+    return saved ?? 'v1'
+  })
+
+  const [contextStrategy, setContextStrategy] = useState<ContextStrategy>(() => {
+    const saved = localStorage.getItem('contextStrategy')
+    return saved === 'window' ? 'window' : 'full'
+  })
+
+  const [windowSize, setWindowSize] = useState<number>(() => {
+    const saved = localStorage.getItem('windowSize')
+    return saved ? Number(saved) : 6
+  })
 
   const [llmSettings, setLlmSettings] = useState<LLMSettings>(() => {
     const saved = localStorage.getItem(SETTINGS_KEY)
@@ -119,7 +130,10 @@ export default function App() {
   const inputRef = useRef<HTMLInputElement>(null)
   const chatWindowRef = useRef<HTMLDivElement>(null)
 
-  const systemPrompt = useMemo(() => buildSystemPromptFromProfile(profile), [profile])
+  const systemPrompt = useMemo(
+    () => buildPromptByVersion(promptVersion, profile),
+    [promptVersion, profile]
+  )
 
   const t = translations[language]
 
@@ -138,6 +152,18 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('language', language)
   }, [language])
+
+  useEffect(() => {
+    localStorage.setItem('promptVersion', promptVersion)
+  }, [promptVersion])
+
+  useEffect(() => {
+    localStorage.setItem('contextStrategy', contextStrategy)
+  }, [contextStrategy])
+
+  useEffect(() => {
+    localStorage.setItem('windowSize', String(windowSize))
+  }, [windowSize])
 
   useEffect(() => {
     chatWindowRef.current?.scrollTo({
@@ -190,16 +216,23 @@ export default function App() {
     setInput('')
     setSending(true)
 
+    const historyToSend =
+      contextStrategy === 'window'
+        ? nextMessages.slice(-windowSize)
+        : nextMessages
+
     try {
       const reply = await sendChat(
         [
           { role: 'system', content: systemPrompt },
-          ...nextMessages.map((message) => ({
+          ...historyToSend.map((message) => ({
             role: message.role,
             content: message.content,
           })),
         ],
-        llmSettings
+        llmSettings,
+        currentCharacterName,
+        promptVersion
       )
 
       const assistantMessage: ChatMessage = {
@@ -359,6 +392,27 @@ export default function App() {
     setShowSettings(false)
   }
 
+  async function handleOpenSettings() {
+    setShowSettings(true)
+    setSettingsTab('api')
+    try {
+      const data = await getStats()
+      setStatsData(data)
+    } catch {
+      setStatsData(null)
+    }
+  }
+
+  async function handleClearStats() {
+    try {
+      await clearStats()
+      const data = await getStats()
+      setStatsData(data)
+    } catch {
+      setStatsData(null)
+    }
+  }
+
   return (
     <>
       <div className="app">
@@ -403,7 +457,7 @@ export default function App() {
               onSend={handleSend}
               onOpenProfile={() => setShowProfileEditor(true)}
               onOpenHistory={() => setShowHistory(true)}
-              onOpenSettings={() => setShowSettings(true)}
+              onOpenSettings={handleOpenSettings}
               theme={theme}
               onChangeTheme={setTheme}
               language={language}
@@ -471,49 +525,230 @@ export default function App() {
       {showSettings && (
         <div className="settings-modal">
           <div className="settings-modal-inner">
-            <h3>{t.settings}</h3>
-
-            <div className="settings-form">
-              <label>
-                API Key
-                <input
-                  type="password"
-                  value={llmSettings.apiKey}
-                  onChange={(event) =>
-                    setLlmSettings((prev) => ({ ...prev, apiKey: event.target.value }))
-                  }
-                />
-              </label>
-
-              <label>
-                Base URL
-                <input
-                  value={llmSettings.baseUrl}
-                  onChange={(event) =>
-                    setLlmSettings((prev) => ({ ...prev, baseUrl: event.target.value }))
-                  }
-                />
-              </label>
-
-              <label>
-                Model
-                <input
-                  value={llmSettings.model}
-                  onChange={(event) =>
-                    setLlmSettings((prev) => ({ ...prev, model: event.target.value }))
-                  }
-                />
-              </label>
-            </div>
-
-            <div className="profile-editor-actions">
-              <button type="button" onClick={() => setShowSettings(false)}>
-                {t.cancel}
-              </button>
-              <button type="button" onClick={handleSaveSettings}>
-                {t.save}
+            <div className="settings-modal-header">
+              <h3>{t.settings}</h3>
+              <button
+                type="button"
+                className="settings-close"
+                onClick={() => setShowSettings(false)}
+              >
+                ×
               </button>
             </div>
+
+            <div className="settings-tabs">
+              <button
+                type="button"
+                className={`settings-tab ${settingsTab === 'api' ? 'settings-tab-active' : ''}`}
+                onClick={() => setSettingsTab('api')}
+              >
+                API
+              </button>
+              <button
+                type="button"
+                className={`settings-tab ${settingsTab === 'prompt' ? 'settings-tab-active' : ''}`}
+                onClick={() => setSettingsTab('prompt')}
+              >
+                Prompt
+              </button>
+              <button
+                type="button"
+                className={`settings-tab ${settingsTab === 'stats' ? 'settings-tab-active' : ''}`}
+                onClick={() => setSettingsTab('stats')}
+              >
+                {t.statsTitle}
+              </button>
+            </div>
+
+            <div className="settings-content">
+              {settingsTab === 'api' && (
+                <div className="settings-form">
+                  <label>
+                    API Key
+                    <input
+                      type="password"
+                      value={llmSettings.apiKey}
+                      onChange={(event) =>
+                        setLlmSettings((prev) => ({ ...prev, apiKey: event.target.value }))
+                      }
+                    />
+                  </label>
+
+                  <label>
+                    Base URL
+                    <input
+                      value={llmSettings.baseUrl}
+                      onChange={(event) =>
+                        setLlmSettings((prev) => ({ ...prev, baseUrl: event.target.value }))
+                      }
+                    />
+                  </label>
+
+                  <label>
+                    Model
+                    <input
+                      value={llmSettings.model}
+                      onChange={(event) =>
+                        setLlmSettings((prev) => ({ ...prev, model: event.target.value }))
+                      }
+                    />
+                  </label>
+                </div>
+              )}
+
+              {settingsTab === 'prompt' && (
+                <div className="settings-form">
+                  <label>
+                    Prompt Version
+                    <select
+                      value={promptVersion}
+                      onChange={(event) =>
+                        setPromptVersion(event.target.value as PromptVersion)
+                      }
+                    >
+                      {promptVersions.map((v) => (
+                        <option key={v.id} value={v.id}>
+                          {v.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label>
+                    上下文策略
+                    <select
+                      value={contextStrategy}
+                      onChange={(event) =>
+                        setContextStrategy(event.target.value as ContextStrategy)
+                      }
+                    >
+                      <option value="full">全量</option>
+                      <option value="window">滑动窗口</option>
+                    </select>
+                  </label>
+
+                  {contextStrategy === 'window' && (
+                    <label>
+                      窗口大小（消息条数）
+                      <input
+                        type="number"
+                        min={2}
+                        max={50}
+                        value={windowSize}
+                        onChange={(event) => setWindowSize(Number(event.target.value))}
+                      />
+                    </label>
+                  )}
+                </div>
+              )}
+
+              {settingsTab === 'stats' && (
+                <>
+                  {!statsData ? (
+                    <p style={{ color: 'var(--text-soft)' }}>—</p>
+                  ) : (
+                    <div className="stats-content">
+                      <div className="stats-grid">
+                        <div className="stats-item">
+                          <span>{t.totalCalls}</span>
+                          <strong>{statsData.total}</strong>
+                        </div>
+                        <div className="stats-item">
+                          <span>{t.todayCalls}</span>
+                          <strong>{statsData.todayCount}</strong>
+                        </div>
+                        <div className="stats-item">
+                          <span>{t.avgLatency}</span>
+                          <strong>{statsData.avgLatency} ms</strong>
+                        </div>
+                        <div className="stats-item">
+                          <span>{t.failureRate}</span>
+                          <strong>{statsData.failureRate}%</strong>
+                        </div>
+                        <div className="stats-item">
+                          <span>{t.totalTokens}</span>
+                          <strong>{statsData.totalTokens}</strong>
+                        </div>
+                        <div className="stats-item">
+                          <span>{t.promptTokens}</span>
+                          <strong>{statsData.totalPromptTokens}</strong>
+                        </div>
+                        <div className="stats-item">
+                          <span>{t.completionTokens}</span>
+                          <strong>{statsData.totalCompletionTokens}</strong>
+                        </div>
+                      </div>
+
+                      <h4>{t.characterUsage}</h4>
+                      <ul className="stats-list">
+                        {Object.entries(statsData.characterStats).map(([name, info]) => (
+                          <li key={name}>
+                            <span>{name}</span>
+                            <span>
+                              {info.count} 次 · 输入 {info.promptTokens} · 输出 {info.completionTokens}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+
+                      <h4>{t.versionUsage}</h4>
+                      <ul className="stats-list">
+                        {Object.entries(statsData.versionStats).map(([version, info]) => (
+                          <li key={version}>
+                            <span>{version}</span>
+                            <span>
+                              {info.count} 次 · 输入 {info.promptTokens ?? 0} · 输出 {info.completionTokens ?? 0} · 平均 {info.avgLatency}ms
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+
+                      <h4>{t.modelUsage}</h4>
+                      <ul className="stats-list">
+                        {Object.entries(statsData.modelCount).map(([model, count]) => (
+                          <li key={model}>
+                            <span>{model}</span>
+                            <span>{count}</span>
+                          </li>
+                        ))}
+                      </ul>
+
+                      <h4>{t.recentRequests}</h4>
+                      <ul className="stats-list">
+                        {statsData.recent.map((item, index) => (
+                          <li key={index}>
+                            <span>
+                              {new Date(item.time).toLocaleTimeString()} · {item.characterName} · {item.model}
+                            </span>
+                            <span>
+                              {item.latency}ms · 入 {item.promptTokens} 出 {item.completionTokens}
+                              {item.success ? '' : ' ✗'}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  <div className="profile-editor-actions">
+                    <button type="button" onClick={handleClearStats}>
+                      {t.clearStats}
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+
+            {settingsTab !== 'stats' && (
+              <div className="profile-editor-actions">
+                <button type="button" onClick={() => setShowSettings(false)}>
+                  {t.cancel}
+                </button>
+                <button type="button" onClick={handleSaveSettings}>
+                  {t.save}
+                </button>
+              </div>
+            )}
           </div>
         </div>
       )}
