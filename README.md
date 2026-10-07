@@ -70,7 +70,8 @@ npm run dev
    - 鼠标滚轮：缩放场景中立绘大小
 
 
-Prompt 与运行优化
+✨ Prompt 与运行优化
+
 Prompt 版本管理
 内置多个 Prompt 版本，可随时切换：
 - v1：基础版，只有角色设定和基础规则
