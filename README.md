@@ -46,6 +46,7 @@ npm run dev
 2. 填入 API Key、Base URL、Model名称
 3. 保存，配置存入浏览器本地存储，刷新页面不会丢失
 <img width="503" height="423" alt="image" src="https://github.com/user-attachments/assets/63b8d9f1-3366-4299-96e2-b04b14d97679" />
+
 > 示例配置参考：
 - DeepSeek
   - Base URL: `https://api.deepseek.com`
